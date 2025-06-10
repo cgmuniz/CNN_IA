@@ -1,3 +1,14 @@
+# =====================================================================================
+# ACH2016 - Inteligência Artificial (2025)
+# EP2 - CNN
+#
+# 11796718 – LUCAS SARTOR CHAUVIN
+# 12873188 – GABRIEL BERNARDINI SCHIMIDT
+# 14564405 – CAUÃ GABRIEL MUNIZ DOS SANTOS
+# 14592498 – LUIS YUDI ODAKE FERREIRA
+# 14778136 – LEONEL MARCO ANTONIO MORGADO
+# =====================================================================================
+
 # -*- coding: utf-8 -*-
 from tensorflow import keras
 from tensorflow.keras import layers
@@ -135,7 +146,6 @@ def tune_model(x_train, y_train, x_val, y_val, run_dir, num_classes):
     Retorna:
         keras_tuner.Tuner: O objeto tuner após a busca.
     """
-
     # Definição do tuner para busca de hiperparâmetros
     tuner = keras_tuner.BayesianOptimization(
         hypermodel=lambda hp: build_model(hp, num_classes),
@@ -305,7 +315,7 @@ def run_experiment(task_name="binary", binary=True):
     score, y_true, y_pred, y_pred_probs = evaluate(model=model, x_test=x_test, y_test=y_test)
     print(f"Resultado da Avaliação para '{task_name}': Loss={score[0]:.4f}, Accuracy={score[1]:.4f}\n")
 
-    # 5. Salvamento dos artefatos e visualizações
+    # 5. Salvamento dos artefatos e gráficos
     save_artifacts(
         run_dir=run_dir, history=history, score=score, best_hps=best_hp,
         y_pred_probs=y_pred_probs, initial_weights=initial_weights, final_weights=final_weights
