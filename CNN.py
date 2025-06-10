@@ -9,6 +9,7 @@ from sklearn.metrics import confusion_matrix
 from sklearn.model_selection import train_test_split
 import pickle
 from pathlib import Path
+import json
 
 def build_model(hp):
     model = keras.Sequential()
@@ -143,13 +144,20 @@ for i, run in enumerate(runs):
     y_pred_classes = np.argmax(y_pred, axis=1)
     y_true_classes = np.argmax(y_test, axis=1)
 
+    # Definir labels das classes utilizadas
+    if project == "binary":
+        classes = [0, 1]  # Apenas classes 0 e 1
+    else:
+        classes = range(10)  # Todas as classes do MNIST
+
     # Plotar a matriz de confusão
-    conf_matrix_data = confusion_matrix(y_true_classes, y_pred_classes)
+    # Calcular matriz de confusão apenas para as classes utilizadas
+    conf_matrix_data = confusion_matrix(y_true_classes, y_pred_classes, labels=classes)
     conf_matrix_fig = plt.figure(figsize=(10, 8))
-    sb.heatmap(conf_matrix_data, annot=True, fmt='d', cmap='Blues', xticklabels=range(10), yticklabels=range(10))
+    sb.heatmap(conf_matrix_data, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
     plt.xlabel('Predicted')
     plt.ylabel('True')
-    plt.title('Confusion Matrix')
+    plt.title(f'Confusion Matrix - {project}')
     conf_matrix_fig.savefig(run_dir / 'confusion_matrix.png')
     plt.close(conf_matrix_fig)
 
@@ -165,9 +173,21 @@ for i, run in enumerate(runs):
     plt.close(loss_fig)
 
     # Salvar resultados
+    results = {
+        "hyperparameters": best_hps.values,
+        "training_history": history.history,
+        "evaluation": {
+            "test_loss": float(score[0]),
+            "test_accuracy": float(score[1])
+        },
+        "best_epoch": best_epoch
+    }
 
     hyperparameters = model.summary()
     print(hyperparameters)
+
+    with open(run_dir / 'results.json', 'w') as f:
+        json.dump(results, f, indent=2)
 
     with open(run_dir / 'hyperparameters.pkl', 'wb') as f:
         pickle.dump(hyperparameters, f)
