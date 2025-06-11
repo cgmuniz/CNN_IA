@@ -21,13 +21,15 @@ from sklearn.metrics import confusion_matrix
 from pathlib import Path
 import pickle
 import json
+from skimage.feature import hog
+import pandas as pd
 
 # ---------------------------- Dados de Entrada ----------------------------
-def load_and_preprocess_data(binary=False, test_size=0.33):
+def load_and_preprocess_data(binary=False, test_size=0.33, feature_extractor='raw'):
     """
     Carrega o dataset MNIST, o pré-processa e o divide em conjuntos de treino, validação e teste.
-
-    Esta função encapsula toda a lógica de preparação dos dados:
+    Retorna os dados como imagens brutas (para CNN) ou como vetores HOG (para MLP).
+    Encapsula toda a lógica de preparação dos dados:
     1. Carrega os dados do Keras.
     2. Filtra para uma classificação binária (dígitos 0 e 1) se `binary=True`.
     3. Divide os dados de treino em conjuntos de treino e validação.
@@ -35,8 +37,9 @@ def load_and_preprocess_data(binary=False, test_size=0.33):
     5. Converte os rótulos para o formato one-hot encoding.
 
     Argumentos:
-        binary (bool): Se True, filtra os dados para usar apenas as classes 0 e 1.
-        test_size (float): A proporção do dataset a ser alocada para o conjunto de validação.
+        binary (bool): Filtra para classes 0 e 1 se True.
+        test_size (float): Proporção para o conjunto de validação.
+        feature_extractor (str): 'raw' para imagens brutas, 'hog' para características HOG
 
     Retorna:
         tuple: Uma tupla contendo os conjuntos de dados ((x_train, y_train), (x_val, y_val), (x_test, y_test))
@@ -59,13 +62,20 @@ def load_and_preprocess_data(binary=False, test_size=0.33):
         x, y, test_size=test_size, random_state=42
     )
 
-    # Função auxiliar para redimensionar e normalizar imagens
-    def reshape_and_normalize(data):
-        return data.reshape(-1, 28, 28, 1).astype("float32") / 255.0
+    if feature_extractor == 'hog':
+        print("Extraindo características HOG...")
+        x_train = extract_hog_features(x_train)
+        x_val = extract_hog_features(x_val)
+        x_test = extract_hog_features(x_test)
+        print(f"Dimensão do vetor HOG: {x_train.shape[1]}")
+    else:  # 'raw'
+        # Função auxiliar para redimensionar e normalizar imagens
+        def reshape_and_normalize(data):
+            return data.reshape(-1, 28, 28, 1).astype("float32") / 255.0
 
-    x_train = reshape_and_normalize(x_train)
-    x_val = reshape_and_normalize(x_val)
-    x_test = reshape_and_normalize(x_test)
+        x_train = reshape_and_normalize(x_train)
+        x_val = reshape_and_normalize(x_val)
+        x_test = reshape_and_normalize(x_test)
 
     # Converte os rótulos de inteiros para vetores categóricos (one-hot encoding)
     y_train = keras.utils.to_categorical(y_train, num_classes=num_classes)
@@ -74,9 +84,45 @@ def load_and_preprocess_data(binary=False, test_size=0.33):
 
     return (x_train, y_train), (x_val, y_val), (x_test, y_test), num_classes
 
+def extract_hog_features(images):
+    """
+    Extrai características HOG de um conjunto de imagens.
+
+    Argumentos:
+        images (np.array): Um array de imagens em escala de cinza (formato [n_samples, width, height]).
+
+    Retorna:
+        np.array: Um array de vetores de características HOG.
+    """
+    hog_features = []
+    for image in images:
+        # Extrai o vetor HOG para cada imagem.
+        # Os parâmetros podem ser ajustados, mas estes são um bom ponto de partida para MNIST.
+        features = hog(image, orientations=9, pixels_per_cell=(8, 8),
+                       cells_per_block=(2, 2), visualize=False, transform_sqrt=True)
+        hog_features.append(features)
+    return np.array(hog_features)
+
+
+def load_results(base_dir="runs"):
+    """Carrega todos os arquivos results.json do diretório de execuções."""
+    results = []
+    run_paths = Path(base_dir).glob("**/results.json")
+
+    for path in run_paths:
+        with open(path, 'r') as f:
+            data = json.load(f)
+            # Extrai o nome do experimento a partir do nome do diretório pai
+            experiment_name = path.parent.name
+            results.append({
+                "Experiment": experiment_name,
+                "Accuracy": data["evaluation"]["test_accuracy"],
+                "Loss": data["evaluation"]["test_loss"]
+            })
+    return pd.DataFrame(results)
 
 # ---------------------------- Modelo ----------------------------
-def build_model(hp, num_classes=10):
+def build_cnn_model(hp, num_classes=10):
     """
     Constrói o modelo CNN com hiperparâmetros ajustáveis pelo Keras Tuner.
 
@@ -132,35 +178,69 @@ def build_model(hp, num_classes=10):
 
     return model
 
+def build_mlp_model(hp, input_shape, num_classes=10):
+    """
+    Constrói um modelo Multi-Layer Perceptron (MLP) com hiperparâmetros ajustáveis.
+
+    Este modelo é ideal para dados tabulares ou vetores de características, como os
+    extraídos pelo HOG. A arquitetura otimiza:
+    - O número de camadas densas.
+    - O número de neurônios em cada camada.
+    - A presença e a taxa de dropout.
+    - A taxa de aprendizado do otimizador Adam.
+
+    Argumentos:
+        hp (HyperParameters): Objeto do Keras Tuner para definir o espaço de busca.
+        input_shape (int): A dimensionalidade do vetor de entrada (ex: tamanho do vetor HOG).
+        num_classes (int): O número de neurônios na camada de saída.
+
+    Retorna:
+        keras.Model: O modelo MLP compilado.
+    """
+    model = keras.Sequential(name="MLP_Model")
+    model.add(keras.Input(shape=(input_shape,)))
+    for i in range(hp.Int('dense_layers', 1, 3)):
+        model.add(layers.Dense(
+            units=hp.Int(f'units_{i}', 64, 512, step=64),
+            activation='relu'
+        ))
+        if hp.Boolean("dropout"):
+            model.add(layers.Dropout(rate=hp.Float(f'dropout_{i}', 0.2, 0.5)))
+    model.add(layers.Dense(num_classes, activation="softmax"))
+    model.compile(
+        optimizer=keras.optimizers.Adam(hp.Float("lr", 1e-4, 1e-2, sampling="log")),
+        loss="categorical_crossentropy", metrics=["accuracy"]
+    )
+    return model
+
 # ---------------------------- Treinamento e Otimização ----------------------------
-def tune_model(x_train, y_train, x_val, y_val, run_dir, num_classes):
+def tune_model(model_builder, x_train, y_train, x_val, y_val, run_dir):
     """
     Executa a otimização de hiperparâmetros usando BayesianOptimization.
 
     Argumentos:
+        model_builder (function): Uma função lambda que constrói o modelo.
         x_train, y_train: Dados de treinamento.
         x_val, y_val: Dados de validação.
         run_dir (Path): Diretório para salvar os resultados do tuner.
-        num_classes (int): Número de classes para passar para a função `build_model`.
 
     Retorna:
-        keras_tuner.Tuner: O objeto tuner após a busca.
+        keras_tuner.Tuner: O objeto tuner após a busca, contendo todos os resultados.
     """
     # Definição do tuner para busca de hiperparâmetros
     tuner = keras_tuner.BayesianOptimization(
-        hypermodel=lambda hp: build_model(hp, num_classes),
+        hypermodel=model_builder,
         objective='val_accuracy',
-        max_trials=10,
+        max_trials=2,  # Reduzido para testes rápidos. Para entrega final, use 10 ou mais.
         directory=run_dir,
         project_name='tuning_trials'
     )
 
     # Busca os melhores hiperparâmetros, parando cedo se a performance não melhorar
     tuner.search(
-        x=x_train,
-        y=y_train,
+        x_train, y_train,
         validation_data=(x_val, y_val),
-        epochs=10,
+        epochs=5,  # Reduzido para testes rápidos. Para entrega final, use 20 ou mais.
         callbacks=[keras.callbacks.EarlyStopping(monitor='val_loss', patience=3)]
     )
 
@@ -178,15 +258,18 @@ def train_final_model(model, x_train, y_train, x_val, y_val):
     Retorna:
         History: Objeto retornado pelo `model.fit` contendo o histórico de treinamento.
     """
+    initial_weights = [layer.get_weights() for layer in model.layers]
     early_stop = keras.callbacks.EarlyStopping(monitor='val_loss', patience=5)
     history = model.fit(
         x=x_train,
         y=y_train,
         validation_data=(x_val, y_val),
-        epochs=100,
+        epochs=10, # todo: mudar aqui para entrega final, deixei baixo para testar
         callbacks=[early_stop]
     )
-    return history
+    final_weights = [layer.get_weights() for layer in model.layers]
+
+    return history, initial_weights, final_weights
 
 # ----------------------------  Avaliação e Visualização ----------------------------
 def evaluate(model, x_test, y_test):
@@ -279,10 +362,31 @@ def plot_accuracy_curve(run_dir, history):
     plt.savefig(fname=run_dir / 'accuracy_curve.png')
     plt.close()
 
+def plot_cnn_hog_comparison(df):
+    """Cria e salva um gráfico de barras comparando a acurácia dos experimentos."""
+    plt.figure(figsize=(12, 7))
+
+    # Usando seaborn para um visual mais agradável
+    barplot = sns.barplot(x="Accuracy", y="Experiment", data=df, palette="viridis", orient='h')
+
+    plt.title("Comparação de Acurácia entre Experimentos", fontsize=16)
+    plt.xlabel("Acurácia no Conjunto de Teste", fontsize=12)
+    plt.ylabel("Experimento", fontsize=12)
+    plt.xlim(0.8, 1.0)  # Ajuste o limite para melhor visualização
+
+    # Adiciona os valores de acurácia nas barras
+    for index, row in df.iterrows():
+        barplot.text(row.Accuracy, index, f'{row.Accuracy:.4f}', color='black', ha="left", va="center")
+
+    plt.tight_layout()
+    plt.savefig("comparison_accuracy.png")
+    print("\nGráfico de comparação salvo como 'comparison_accuracy.png'")
+    plt.show()
+
 # ---------------------------- Execução do Experimento ----------------------------
-def run_experiment(task_name="binary", binary=True):
+def run_experiment(task_name="binary", binary=True, model_type="cnn"):
     """
-    Executa um fluxo completo de experimento de uma rede CNN.
+    Executa um fluxo completo de experimento de uma rede CNN ou MLP.
 
     Encapsula todas as etapas: configuração, carregamento de dados, otimização,
     treinamento, avaliação e salvamento de resultados e visualizações.
@@ -290,32 +394,49 @@ def run_experiment(task_name="binary", binary=True):
     Argumentos:
         task_name (str): Nome do experimento, usado para criar o diretório de saída.
         binary (bool): Define se o experimento é de classificação binária ou multiclasse.
+        model_type (str): 'cnn' para usar imagens brutas ou 'mlp' para usar HOG.
     """
     print(f"--- Iniciando experimento: {task_name} ---")
     run_dir = Path("runs") / task_name
 
     # 1. Preparação dos dados
-    (x_train, y_train), (x_val, y_val), (x_test, y_test), num_classes = load_and_preprocess_data(binary=binary)
+    feature_extractor = 'hog' if model_type == 'mlp' else 'raw'
+    (x_train, y_train), (x_val, y_val), (x_test, y_test), num_classes = \
+        load_and_preprocess_data(binary=binary, feature_extractor=feature_extractor)
 
-    # 2. Otimização de hiperparâmetros
-    tuner = tune_model(x_train, y_train, x_val, y_val, run_dir=run_dir, num_classes=num_classes)
+    # 2. Definição do construtor do modelo
+    if model_type == 'mlp':
+        input_shape = x_train.shape[1]
+        model_builder = lambda hp: build_mlp_model(hp, input_shape=input_shape, num_classes=num_classes)
+    else:  # cnn
+        model_builder = lambda hp: build_cnn_model(hp, num_classes=num_classes)
+
+    # 3. Otimização de hiperparâmetros
+    tuner = tune_model(
+        model_builder=model_builder,
+        x_train=x_train, y_train=y_train,
+        x_val=x_val, y_val=y_val,
+        run_dir=run_dir
+    )
+
+    # 4. Construção e Treinamento do modelo final
     best_hp = tuner.get_best_hyperparameters(num_trials=1)[0]
-
     print(f"Melhores hiperparâmetros encontrados para '{task_name}':")
     for param, value in best_hp.values.items():
         print(f" - {param}: {value}")
 
-    # 3. Treinamento do modelo final
-    model = build_model(hp=best_hp, num_classes=num_classes)
-    initial_weights = [layer.get_weights() for layer in model.layers]
-    history = train_final_model(model=model, x_train=x_train, y_train=y_train, x_val=x_val, y_val=y_val)
-    final_weights = [layer.get_weights() for layer in model.layers]
+    model = tuner.hypermodel.build(best_hp)
+    history, initial_weights, final_weights = train_final_model(
+        model=model,
+        x_train=x_train, y_train=y_train,
+        x_val=x_val, y_val=y_val
+    )
 
-    # 4. Avaliação
+    # 5. Avaliação
     score, y_true, y_pred, y_pred_probs = evaluate(model=model, x_test=x_test, y_test=y_test)
     print(f"Resultado da Avaliação para '{task_name}': Loss={score[0]:.4f}, Accuracy={score[1]:.4f}\n")
 
-    # 5. Salvamento dos artefatos e gráficos
+    # 6. Salvamento dos artefatos e gráficos
     save_artifacts(
         run_dir=run_dir, history=history, score=score, best_hps=best_hp,
         y_pred_probs=y_pred_probs, initial_weights=initial_weights, final_weights=final_weights
@@ -329,5 +450,10 @@ def run_experiment(task_name="binary", binary=True):
 # ---------------------------- Main ----------------------------
 if __name__ == "__main__":
     # Executa os dois experimentos definidos: um multiclasse e um binário.
-    run_experiment(task_name="multiclass", binary=False)
-    run_experiment(task_name="binary", binary=True)
+    run_experiment(task_name="cnn_multiclass", binary=False, model_type='cnn')
+    run_experiment(task_name="cnn_binary", binary=True, model_type='cnn')
+    run_experiment(task_name="mlp_hog_multiclass", binary=False, model_type='mlp')
+    run_experiment(task_name="mlp_hog_binary", binary=True, model_type='mlp')
+    results_df = load_results()
+    results_df = results_df.sort_values(by="Accuracy", ascending=False).reset_index(drop=True)
+    plot_cnn_hog_comparison(df=results_df)
