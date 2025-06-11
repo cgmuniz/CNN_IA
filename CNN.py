@@ -231,7 +231,7 @@ def tune_model(model_builder, x_train, y_train, x_val, y_val, run_dir):
     tuner = keras_tuner.BayesianOptimization(
         hypermodel=model_builder,
         objective='val_accuracy',
-        max_trials=2,  # Reduzido para testes rápidos. Para entrega final, use 10 ou mais.
+        max_trials=2,  # todo: mudar aqui para entrega final, deixei baixo para testar
         directory=run_dir,
         project_name='tuning_trials'
     )
@@ -240,7 +240,7 @@ def tune_model(model_builder, x_train, y_train, x_val, y_val, run_dir):
     tuner.search(
         x_train, y_train,
         validation_data=(x_val, y_val),
-        epochs=5,  # Reduzido para testes rápidos. Para entrega final, use 20 ou mais.
+        epochs=5,  # todo: mudar aqui para entrega final, deixei baixo para testar
         callbacks=[keras.callbacks.EarlyStopping(monitor='val_loss', patience=3)]
     )
 
