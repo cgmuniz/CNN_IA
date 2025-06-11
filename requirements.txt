@@ -1,0 +1,15 @@
+# =====================================================================================
+# Arquivo de dependências para o EP2 de Inteligência Artificial (ACH2016)
+#
+# Para instalar todas as dependências, execute o comando:
+# pip install -r requirements.txt
+# =====================================================================================
+
+tensorflow==2.15.0
+keras-tuner==1.4.7
+numpy==1.26.4
+pandas==2.2.2
+matplotlib==3.8.4
+seaborn==0.13.2
+scikit-learn==1.4.2
+scikit-image==0.22.0
