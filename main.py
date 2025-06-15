@@ -19,10 +19,12 @@ import seaborn as sns
 from sklearn.model_selection import train_test_split
 from sklearn.metrics import confusion_matrix
 from pathlib import Path
-import pickle
 import json
 from skimage.feature import hog
 import pandas as pd
+import time
+from CNN_IA.analysis import run_full_analysis
+
 
 # ---------------------------- Dados de Entrada ----------------------------
 def load_and_preprocess_data(binary=False, test_size=0.33, feature_extractor='raw'):
@@ -110,14 +112,18 @@ def load_results(base_dir="runs"):
     run_paths = Path(base_dir).glob("**/results.json")
 
     for path in run_paths:
-        with open(path, 'r') as f:
+        with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-            # Extrai o nome do experimento a partir do nome do diretório pai
             experiment_name = path.parent.name
+            time_data = data.get("execution_time_seconds", {})
             results.append({
-                "Experiment": experiment_name,
-                "Accuracy": data["evaluation"]["test_accuracy"],
-                "Loss": data["evaluation"]["test_loss"]
+                "Experimento": experiment_name,
+                "Modelo": "CNN" if "cnn" in experiment_name else "MLP+HOG",
+                "Tarefa": "Binária" if "binary" in experiment_name else "Multiclasse",
+                "Tempo de Tuning (s)": time_data.get("tuning_phase", 0),
+                "Tempo de Treinamento (s)": time_data.get("final_training_phase", 0),
+                "Tempo Total (s)": time_data.get("total", 0),
+                "Acurácia": data.get("evaluation", {}).get("test_accuracy", 0)
             })
     return pd.DataFrame(results)
 
@@ -236,6 +242,9 @@ def tune_model(model_builder, x_train, y_train, x_val, y_val, run_dir):
         project_name='tuning_trials'
     )
 
+    # Começa timer para tempo de tuning
+    start_time = time.time()
+
     # Busca os melhores hiperparâmetros, parando cedo se a performance não melhorar
     tuner.search(
         x_train, y_train,
@@ -244,7 +253,25 @@ def tune_model(model_builder, x_train, y_train, x_val, y_val, run_dir):
         callbacks=[keras.callbacks.EarlyStopping(monitor='val_loss', patience=3)]
     )
 
-    return tuner
+    # Calcula tempo de tuning
+    end_time = time.time()
+    tuning_time_seconds = end_time - start_time
+    print(f"Tempo de tuning: {tuning_time_seconds:.2f} segundos")
+
+    # Salvamos dados dos trials em um arquivo para análise posterior
+    trials_data = []
+    for trial in tuner.oracle.trials.values():
+        if trial.status == "COMPLETED":
+            trial_info = {
+                'trial_id': trial.trial_id,
+                'score': trial.score,
+                'hyperparameters': trial.hyperparameters.values
+            }
+            trials_data.append(trial_info)
+    with open(run_dir / "tuning_analysis.json", "w", encoding="utf-8") as f:
+        json.dump(trials_data, f, indent=4)
+
+    return tuner, tuning_time_seconds
 
 def train_final_model(model, x_train, y_train, x_val, y_val):
     """
@@ -260,6 +287,7 @@ def train_final_model(model, x_train, y_train, x_val, y_val):
     """
     initial_weights = [layer.get_weights() for layer in model.layers]
     early_stop = keras.callbacks.EarlyStopping(monitor='val_loss', patience=5)
+    start_time = time.time()
     history = model.fit(
         x=x_train,
         y=y_train,
@@ -267,9 +295,14 @@ def train_final_model(model, x_train, y_train, x_val, y_val):
         epochs=10, # todo: mudar aqui para entrega final, deixei baixo para testar
         callbacks=[early_stop]
     )
+
+    end_time = time.time()
+    training_time_seconds = end_time - start_time
+    print(f"Tempo de treinamento final: {training_time_seconds:.2f} segundos")
+
     final_weights = [layer.get_weights() for layer in model.layers]
 
-    return history, initial_weights, final_weights
+    return history, initial_weights, final_weights, training_time_seconds
 
 # ----------------------------  Avaliação e Visualização ----------------------------
 def evaluate(model, x_test, y_test):
@@ -290,98 +323,55 @@ def evaluate(model, x_test, y_test):
     y_true = np.argmax(y_test, axis=1)
     return score, y_true, y_pred, y_pred_probs
 
-def save_artifacts(run_dir, history, score, best_hps, y_pred_probs, initial_weights, final_weights):
+def save_artifacts(run_dir, history, score, best_hps, y_pred_probs, initial_weights, final_weights, tuning_time, training_time):
     """
-    Salva todos os artefatos do experimento: resultados, histórico, predições e pesos.
-
-    Argumentos:
-        run_dir (Path): Diretório para salvar os artefatos.
-        history (History): Histórico de treinamento.
-        score (list): Lista com loss e accuracy do teste.
-        best_hps (HyperParameters): Melhores hiperparâmetros encontrados.
-        y_pred_probs (np.array): Predições (probabilidades) no conjunto de teste.
-        initial_weights (list): Pesos do modelo antes do treinamento.
-        final_weights (list): Pesos do modelo após o treinamento.
+    Salva todos os artefatos do experimento: resultados, histórico, predições, pesos e tempos de execução.
     """
     run_dir.mkdir(parents=True, exist_ok=True)
 
-    # Salva os resultados principais em um arquivo JSON
+    # Função auxiliar para converter arrays NumPy em listas
+    def convert_numpy_to_list(data):
+        if isinstance(data, np.ndarray):
+            return data.tolist()
+        if isinstance(data, (np.int_, np.intc, np.intp, np.int8, np.int16, np.int32, np.int64, np.uint8, np.uint16, np.uint32, np.uint64)):
+            return int(data)
+        if isinstance(data, (np.float64, np.float16, np.float32, np.float64)):
+            return float(data)
+        if isinstance(data, list):
+            return [convert_numpy_to_list(item) for item in data]
+        if isinstance(data, dict):
+            return {key: convert_numpy_to_list(value) for key, value in data.items()}
+        return data
+
+    # Salva os resultados principais e tempos de execução
     results_data = {
         "hyperparameters": best_hps.values,
-        "evaluation": {"test_loss": float(score[0]), "test_accuracy": float(score[1])},
-        "best_epoch": len(history.history["val_accuracy"])
+        "evaluation": {
+            "test_loss": float(score[0]),
+            "test_accuracy": float(score[1]),
+        },
+        "execution_time_seconds": {
+            "tuning_phase": round(tuning_time, 2),
+            "final_training_phase": round(training_time, 2),
+            "total": round(tuning_time + training_time, 2),
+        },
+        "best_epoch": int(np.argmin(history.history['val_loss']) + 1)
     }
     with open(run_dir / "results.json", "w", encoding="utf-8") as f:
-        json.dump(obj=results_data, fp=f, indent=2)
+        json.dump(results_data, f, indent=4)
 
-    # Salva outros artefatos usando pickle
-    artifacts = {
-        "history.pkl": history.history,
-        "predictions.pkl": y_pred_probs,
-        "initial_weights.pkl": initial_weights,
-        "final_weights.pkl": final_weights
+    with open(run_dir / "training_history.json", "w", encoding="utf-8") as f:
+        json.dump(convert_numpy_to_list(history.history), f, indent=4)
+
+    artifacts_to_save = {
+        "predictions.json": y_pred_probs,
+        "initial_weights.json": initial_weights,
+        "final_weights.json": final_weights,
     }
-    for fname, data in artifacts.items():
-        with open(run_dir / fname, "wb") as f:
-            pickle.dump(obj=data, file=f)
 
-def plot_confusion_matrix(run_dir, y_true, y_pred, classes):
-    """Gera e salva a imagem da matriz de confusão."""
-    cm = confusion_matrix(y_true=y_true, y_pred=y_pred, labels=classes)
-    plt.figure(figsize=(8, 6))
-    sns.heatmap(data=cm, annot=True, fmt='d', cmap='Blues', xticklabels=classes, yticklabels=classes)
-    plt.title('Matriz de Confusão')
-    plt.ylabel('Verdadeiro')
-    plt.xlabel('Predito')
-    plt.savefig(fname=run_dir / 'confusion_matrix.png')
-    plt.close()
-
-def plot_learning_curve(run_dir, history):
-    """Gera e salva o gráfico da curva de aprendizado (loss)."""
-    plt.figure(figsize=(8, 6))
-    plt.plot(history.history['loss'], label='Loss de Treino')
-    plt.plot(history.history['val_loss'], label='Loss de Validação')
-    plt.title('Curva de Aprendizado')
-    plt.xlabel('Épocas')
-    plt.ylabel('Loss (Perda)')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(fname=run_dir / 'learning_curve.png')
-    plt.close()
-
-def plot_accuracy_curve(run_dir, history):
-    """Gera e salva o gráfico da curva de acurácia (accuracy)."""
-    plt.figure(figsize=(8, 6))
-    plt.plot(history.history['accuracy'], label='Acurácia de Treino')
-    plt.plot(history.history['val_accuracy'], label='Acurácia de Validação')
-    plt.title('Curva de Acurácia')
-    plt.xlabel('Épocas')
-    plt.ylabel('Acurácia')
-    plt.legend()
-    plt.grid(True)
-    plt.savefig(fname=run_dir / 'accuracy_curve.png')
-    plt.close()
-
-def plot_cnn_hog_comparison(df):
-    """Cria e salva um gráfico de barras comparando a acurácia dos experimentos."""
-    plt.figure(figsize=(12, 7))
-
-    # Usando seaborn para um visual mais agradável
-    barplot = sns.barplot(x="Accuracy", y="Experiment", data=df, palette="viridis", orient='h')
-
-    plt.title("Comparação de Acurácia entre Experimentos", fontsize=16)
-    plt.xlabel("Acurácia no Conjunto de Teste", fontsize=12)
-    plt.ylabel("Experimento", fontsize=12)
-    plt.xlim(0.8, 1.0)  # Ajuste o limite para melhor visualização
-
-    # Adiciona os valores de acurácia nas barras
-    for index, row in df.iterrows():
-        barplot.text(row.Accuracy, index, f'{row.Accuracy:.4f}', color='black', ha="left", va="center")
-
-    plt.tight_layout()
-    plt.savefig("comparison_accuracy.png")
-    print("\nGráfico de comparação salvo como 'comparison_accuracy.png'")
-    plt.show()
+    for filename, data in artifacts_to_save.items():
+        with open(run_dir / filename, "w", encoding="utf-8") as f:
+            json.dump(convert_numpy_to_list(data), f)
 
 # ---------------------------- Execução do Experimento ----------------------------
 def run_experiment(task_name="binary", binary=True, model_type="cnn"):
@@ -412,7 +402,7 @@ def run_experiment(task_name="binary", binary=True, model_type="cnn"):
         model_builder = lambda hp: build_cnn_model(hp, num_classes=num_classes)
 
     # 3. Otimização de hiperparâmetros
-    tuner = tune_model(
+    tuner, tuning_time = tune_model(
         model_builder=model_builder,
         x_train=x_train, y_train=y_train,
         x_val=x_val, y_val=y_val,
@@ -426,7 +416,7 @@ def run_experiment(task_name="binary", binary=True, model_type="cnn"):
         print(f" - {param}: {value}")
 
     model = tuner.hypermodel.build(best_hp)
-    history, initial_weights, final_weights = train_final_model(
+    history, initial_weights, final_weights, training_time = train_final_model(
         model=model,
         x_train=x_train, y_train=y_train,
         x_val=x_val, y_val=y_val
@@ -436,24 +426,23 @@ def run_experiment(task_name="binary", binary=True, model_type="cnn"):
     score, y_true, y_pred, y_pred_probs = evaluate(model=model, x_test=x_test, y_test=y_test)
     print(f"Resultado da Avaliação para '{task_name}': Loss={score[0]:.4f}, Accuracy={score[1]:.4f}\n")
 
-    # 6. Salvamento dos artefatos e gráficos
+    # 6. Salvamento dos artefatos e gráficos da execução
     save_artifacts(
         run_dir=run_dir, history=history, score=score, best_hps=best_hp,
-        y_pred_probs=y_pred_probs, initial_weights=initial_weights, final_weights=final_weights
+        y_pred_probs=y_pred_probs, initial_weights=initial_weights, final_weights=final_weights,
+        tuning_time=tuning_time, training_time=training_time
     )
-    plot_confusion_matrix(run_dir=run_dir, y_true=y_true, y_pred=y_pred, classes=range(num_classes))
-    plot_learning_curve(run_dir=run_dir, history=history)
-    plot_accuracy_curve(run_dir=run_dir, history=history)
-
     print(f"--- Experimento '{task_name}' concluído. Resultados salvos em: {run_dir} ---")
 
 # ---------------------------- Main ----------------------------
 if __name__ == "__main__":
-    # Executa os dois experimentos definidos: um multiclasse e um binário.
+    # Executa os experimentos CNN definidos: um multiclasse e um binário.
     run_experiment(task_name="cnn_multiclass", binary=False, model_type='cnn')
     run_experiment(task_name="cnn_binary", binary=True, model_type='cnn')
+
+    # Executa os experimentos HOG definidos: um multiclasse e um binário.
     run_experiment(task_name="mlp_hog_multiclass", binary=False, model_type='mlp')
     run_experiment(task_name="mlp_hog_binary", binary=True, model_type='mlp')
-    results_df = load_results()
-    results_df = results_df.sort_values(by="Accuracy", ascending=False).reset_index(drop=True)
-    plot_cnn_hog_comparison(df=results_df)
+
+    # Gera gráficos e imagens de análise
+    run_full_analysis()
