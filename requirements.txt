@@ -1,4 +1,13 @@
 # =====================================================================================
+# ACH2016 - Inteligência Artificial (2025)
+# EP2 - CNN
+#
+# 11796718 – LUCAS SARTOR CHAUVIN
+# 12873188 – GABRIEL BERNARDINI SCHIMIDT
+# 14564405 – CAUÃ GABRIEL MUNIZ DOS SANTOS
+# 14592498 – LUIS YUDI ODAKE FERREIRA
+# 14778136 – LEONEL MARCO ANTONIO MORGADO
+#
 # Arquivo de dependências para o EP2 de Inteligência Artificial (ACH2016)
 #
 # Para instalar todas as dependências, execute o comando:
@@ -6,7 +15,7 @@
 # =====================================================================================
 
 # --- Core para Machine Learning e Execução ---
-tensorflow==2.15.0
+tensorflow==2.16.1
 keras-tuner==1.4.7
 numpy==1.26.4
 scikit-learn==1.4.2

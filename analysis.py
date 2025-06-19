@@ -8,12 +8,15 @@
 # 14592498 – LUIS YUDI ODAKE FERREIRA
 # 14778136 – LEONEL MARCO ANTONIO MORGADO
 # =====================================================================================
+import keras_tuner
 import pandas as pd
 import json
 from pathlib import Path
 import matplotlib.pyplot as plt
 import seaborn as sns
+from matplotlib.ticker import ScalarFormatter
 from sklearn.metrics import confusion_matrix
+from models import build_cnn_model
 
 
 def plot_learning_curves(run_dir, history_data):
@@ -96,41 +99,159 @@ def _plot_accuracy_time_tradeoff(df, output_dir):
 
 
 def _plot_hyperparameter_analysis_for_cnn(base_dir, output_dir):
-    """Carrega os dados de otimização da CNN e gera gráficos de sensibilidade."""
+    """
+    Carrega os dados de otimização da CNN e gera uma análise visual detalhada
+    do impacto de múltiplos hiperparâmetros no desempenho.
+    """
+    # Itera sobre os dois experimentos da CNN
     for exp_name in ["cnn_multiclass", "cnn_binary"]:
         path = base_dir / exp_name / "tuning_analysis.json"
         if not path.exists():
             continue
+
         with open(path, 'r', encoding='utf-8') as f:
             data = json.load(f)
-        df = pd.DataFrame([{'val_accuracy': t['score'], **t['hyperparameters']} for t in data])
+
+        # Transforma os dados em um DataFrame do Pandas para fácil manipulação
+        records = [{'val_accuracy': t['score'], **t['hyperparameters']} for t in data]
+        df = pd.DataFrame(records)
         if df.empty:
             continue
 
+        # --- Geração dos Gráficos ---
         task_title = "CNN - Tarefa Multiclasse" if "multiclass" in exp_name else "CNN - Tarefa Binária"
-        fig, axes = plt.subplots(1, 2, figsize=(20, 8))
-        fig.suptitle(f'Análise de Sensibilidade a Hiperparâmetros\n({task_title})', fontsize=20)
 
-        sns.scatterplot(data=df, x='lr', y='val_accuracy', ax=axes[0], hue='conv_layers', palette='coolwarm', s=100,
-                        alpha=0.8)
-        axes[0].set_xscale('log')
-        axes[0].set_title('Taxa de Aprendizado vs. Acurácia', fontsize=16)
-        axes[0].set_xlabel('Taxa de Aprendizado (Escala Log)')
-        axes[0].set_ylabel('Acurácia de Validação do Trial')
-        axes[0].grid(True, which="both", ls="--")
-        axes[0].legend(title='Nº Camadas Conv.')
+        # Cria uma figura com 4 subplots (2x2) para uma análise completa
+        fig, axes = plt.subplots(2, 2, figsize=(20, 16))
+        fig.suptitle(f'Análise de Sensibilidade a Hiperparâmetros\n({task_title})', fontsize=22)
 
-        sns.boxplot(data=df, x='conv_layers', y='val_accuracy', ax=axes[1], palette='crest')
-        sns.stripplot(data=df, x='conv_layers', y='val_accuracy', ax=axes[1], color=".25", alpha=0.6)
-        axes[1].set_title('Nº de Camadas de Convolução vs. Acurácia', fontsize=16)
-        axes[1].set_xlabel('Número de Camadas de Convolução')
-        axes[1].set_ylabel('')
-        axes[1].grid(True, axis='y', ls="--")
+        # Gráfico 1: Taxa de Aprendizado (lr)
+        ax = axes[0, 0]
+        sns.scatterplot(data=df, x='lr', y='val_accuracy', hue='conv_layers', palette='coolwarm', s=100, alpha=0.8,
+                        ax=ax)
+        ax.set_xscale('log')
+        ax.xaxis.set_major_formatter(ScalarFormatter())  # Formata os rótulos para decimal
+        ax.set_title('Taxa de Aprendizado vs. Acurácia', fontsize=16)
+        ax.set_xlabel('Taxa de Aprendizado', fontsize=12)
+        ax.set_ylabel('Acurácia de Validação do Trial', fontsize=12)
+        ax.grid(True, which="both", ls="--")
+        ax.legend(title='Nº Camadas Conv.')
 
-        plt.tight_layout(rect=[0, 0, 1, 0.96])
-        plt.savefig(output_dir / f'analise_hps_{exp_name}.png')
+        # Gráfico 2: Número de Filtros na 1ª Camada (filters_0)
+        ax = axes[0, 1]
+        sns.boxplot(data=df, x='filters_0', y='val_accuracy', ax=ax, palette='magma')
+        sns.stripplot(data=df, x='filters_0', y='val_accuracy', ax=ax, color=".25", alpha=0.6)
+        ax.set_title('Nº de Filtros (1ª Camada) vs. Acurácia', fontsize=16)
+        ax.set_xlabel('Número de Filtros', fontsize=12)
+        ax.set_ylabel('')  # Remove rótulo Y para um visual mais limpo
+        ax.grid(True, axis='y', ls="--")
+
+        # Gráfico 3: Tamanho do Kernel na 1ª Camada (kernel_size_0)
+        ax = axes[1, 0]
+        # Para o kernel, o boxplot é ideal para comparar as duas categorias (1 e 5)
+        sns.boxplot(data=df, x='kernel_size_0', y='val_accuracy', ax=ax, palette='viridis')
+        sns.stripplot(data=df, x='kernel_size_0', y='val_accuracy', ax=ax, color=".25", alpha=0.6)
+        ax.set_title('Tamanho do Kernel (1ª Camada) vs. Acurácia', fontsize=16)
+        ax.set_xlabel('Tamanho do Kernel', fontsize=12)
+        ax.set_ylabel('Acurácia de Validação do Trial', fontsize=12)
+        ax.grid(True, axis='y', ls="--")
+
+        # Gráfico 4: Tamanho do Pooling na 1ª Camada (pool_size_0)
+        ax = axes[1, 1]
+        # Verifica se o hiperparâmetro existe, pois ele pode não estar em todos os trials
+        if 'pool_size_0' in df.columns:
+            sns.boxplot(data=df, x='pool_size_0', y='val_accuracy', ax=ax, palette='plasma')
+            sns.stripplot(data=df, x='pool_size_0', y='val_accuracy', ax=ax, color=".25", alpha=0.6)
+            ax.set_title('Tamanho do Pooling (1ª Camada) vs. Acurácia', fontsize=16)
+            ax.set_xlabel('Tamanho do Pooling (2x2 ou 3x3)', fontsize=12)
+        else:
+            ax.text(0.5, 0.5, 'Dados de "pool_size_0"\nnão encontrados nos trials.',
+                    horizontalalignment='center', verticalalignment='center',
+                    fontsize=12, transform=ax.transAxes)
+            ax.set_title('Tamanho do Pooling (1ª Camada)', fontsize=16)
+        ax.set_ylabel('')
+        ax.grid(True, axis='y', ls="--")
+
+        # Ajusta o layout geral para evitar sobreposição e salva a figura
+        plt.tight_layout(rect=[0, 0, 1, 0.95])
+        output_filename = f'analise_hps_detalhada_{exp_name}.png'
+        plt.savefig(output_dir / output_filename)
         plt.close()
 
+
+def _plot_pareto_front_analysis(base_dir, output_dir):
+    """
+    Analisa todos os trials da CNN para visualizar o trade-off entre
+    performance (acurácia) e complexidade (número de parâmetros).
+    """
+    print("\n--- Gerando Análise de Eficiência do Modelo (Fronteira de Pareto) ---")
+    for exp_name in ["cnn_multiclass", "cnn_binary"]:
+        path = base_dir / exp_name / "tuning_analysis.json"
+        if not path.exists():
+            continue
+
+        with open(path, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+
+        # Para cada trial, vamos reconstruir o modelo para contar seus parâmetros
+        trial_analysis = []
+        for trial in data:
+            hp = keras_tuner.HyperParameters()
+            # Precisamos recarregar os HPs do trial no objeto hp
+            for key, value in trial['hyperparameters'].items():
+                hp.Fixed(key, value=value)
+
+            # Reconstruímos o modelo apenas para contar os parâmetros
+            num_classes = 10 if "multiclass" in exp_name else 2
+            model = build_cnn_model(hp, num_classes)
+
+            trial_analysis.append({
+                'val_accuracy': trial['score'],
+                'parameters': model.count_params(),
+                'trial_id': trial['trial_id']
+            })
+
+        df = pd.DataFrame(trial_analysis)
+        if df.empty:
+            continue
+
+        # Encontra o melhor trial para destacá-lo no gráfico
+        best_trial_idx = df['val_accuracy'].idxmax()
+        best_trial = df.loc[best_trial_idx]
+
+        # Geração do Gráfico
+        task_title = "CNN - Tarefa Multiclasse" if "multiclass" in exp_name else "CNN - Tarefa Binária"
+        plt.figure(figsize=(14, 8))
+
+        ax = sns.scatterplot(
+            data=df,
+            x='parameters',
+            y='val_accuracy',
+            palette='viridis',
+            s=80,
+            alpha=0.7
+        )
+
+        # Destaca o melhor ponto
+        ax.scatter(
+            best_trial['parameters'], best_trial['val_accuracy'],
+            color='red', s=200, edgecolor='black', zorder=5,
+            label=f"Melhor Trial ({best_trial['val_accuracy']:.4f})"
+        )
+
+        ax.set_title(f'Análise de Eficiência: Acurácia vs. Complexidade do Modelo\n({task_title})', fontsize=18, pad=20)
+        ax.set_xlabel('Número de Parâmetros Treináveis (Complexidade)', fontsize=12)
+        ax.set_ylabel('Acurácia de Validação do Trial', fontsize=12)
+        ax.grid(True, which="both", ls="--", alpha=0.5)
+        ax.legend()
+
+        # Formata o eixo X para ser mais legível (ex: 1.5M em vez de 1500000)
+        ax.xaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x / 1_000_000:.1f}M'))
+
+        plt.tight_layout()
+        output_filename = f'analise_eficiencia_{exp_name}.png'
+        plt.savefig(output_dir / output_filename)
+        plt.close()
 
 def run_full_analysis():
     """
@@ -165,4 +286,9 @@ def run_full_analysis():
     if not results_df.empty:
         output_dir = Path('.')
         _plot_accuracy_time_tradeoff(results_df, output_dir)
-        _plot_hyperparameter_analysis_for_cnn(base_dir, output_dir)
+       # _plot_hyperparameter_analysis_for_cnn(base_dir, output_dir)
+       # _plot_pareto_front_analysis(base_dir, output_dir)
+
+
+def main():
+    run_full_analysis()
