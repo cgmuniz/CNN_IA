@@ -99,7 +99,6 @@ def extract_hog_features(images):
     hog_features = []
     for image in images:
         # Extrai o vetor HOG para cada imagem.
-        # Os parâmetros podem ser ajustados, mas estes são um bom ponto de partida para MNIST.
         features = hog(image, orientations=9, pixels_per_cell=(8, 8),
                        cells_per_block=(2, 2), visualize=False, transform_sqrt=True)
         hog_features.append(features)
@@ -150,9 +149,9 @@ def build_cnn_model(hp, num_classes=10):
     model.add(keras.Input(shape=(28, 28, 1)))
 
     # Constrói blocos convolucionais dinamicamente
-    for i in range(hp.Int(name='conv_layers', min_value=1, max_value=2)):
+    for i in range(hp.Int(name='conv_layers', min_value=1, max_value=10)):
         model.add(layers.Conv2D(
-            filters=hp.Int(name=f'filters_{i}', min_value=32, max_value=128, step=32),
+            filters=hp.Int(name=f'filters_{i}', min_value=32, max_value=256, step=32),
             kernel_size=hp.Choice(name=f'kernel_size_{i}', values=[3, 5]),
             activation=hp.Choice(name=f'conv_activation_{i}', values=['relu', 'tanh'])
         ))
@@ -161,9 +160,9 @@ def build_cnn_model(hp, num_classes=10):
     model.add(layers.Flatten())
 
     # Constrói camadas densas dinamicamente
-    for i in range(hp.Int(name='dense_layers', min_value=1, max_value=2)):
+    for i in range(hp.Int(name='dense_layers', min_value=1, max_value=10)):
         model.add(layers.Dense(
-            units=hp.Int(name=f'units_{i}', min_value=64, max_value=256, step=64),
+            units=hp.Int(name=f'units_{i}', min_value=64, max_value=512, step=64),
             activation=hp.Choice(name=f'dense_activation_{i}', values=['relu', 'tanh'])
         ))
         if hp.Boolean(name='dropout'):
@@ -237,7 +236,7 @@ def tune_model(model_builder, x_train, y_train, x_val, y_val, run_dir):
     tuner = keras_tuner.BayesianOptimization(
         hypermodel=model_builder,
         objective='val_accuracy',
-        max_trials=2,  # todo: mudar aqui para entrega final, deixei baixo para testar
+        max_trials=50,  
         directory=run_dir,
         project_name='tuning_trials'
     )
@@ -249,8 +248,8 @@ def tune_model(model_builder, x_train, y_train, x_val, y_val, run_dir):
     tuner.search(
         x_train, y_train,
         validation_data=(x_val, y_val),
-        epochs=5,  # todo: mudar aqui para entrega final, deixei baixo para testar
-        callbacks=[keras.callbacks.EarlyStopping(monitor='val_loss', patience=3)]
+        epochs=50, 
+        callbacks=[keras.callbacks.EarlyStopping(monitor='val_loss', patience=5)]
     )
 
     # Calcula tempo de tuning
@@ -292,7 +291,8 @@ def train_final_model(model, x_train, y_train, x_val, y_val):
         x=x_train,
         y=y_train,
         validation_data=(x_val, y_val),
-        epochs=10, # todo: mudar aqui para entrega final, deixei baixo para testar
+        batch_size=1024,
+        epochs=50, # todo: mudar aqui para entrega final, deixei baixo para testar
         callbacks=[early_stop]
     )
 
@@ -323,7 +323,9 @@ def evaluate(model, x_test, y_test):
     y_true = np.argmax(y_test, axis=1)
     return score, y_true, y_pred, y_pred_probs
 
-def save_artifacts(run_dir, history, score, best_hps, y_pred_probs, initial_weights, final_weights, tuning_time, training_time):
+
+
+def save_artifacts(run_dir, history, score, best_hps, y_pred_probs, initial_weights, final_weights, tuning_time, training_time, y_true, y_pred):
     """
     Salva todos os artefatos do experimento: resultados, histórico, predições, pesos e tempos de execução.
     """
@@ -357,6 +359,16 @@ def save_artifacts(run_dir, history, score, best_hps, y_pred_probs, initial_weig
         },
         "best_epoch": int(np.argmin(history.history['val_loss']) + 1)
     }
+    
+    # Salva os valores y_true e y_pred para matriz de confusão
+    evaluation_outputs = {
+        "y_true": convert_numpy_to_list(y_true),
+        "y_pred": convert_numpy_to_list(y_pred)
+    }
+
+    with open(run_dir / "evaluation_outputs.json", "w", encoding="utf-8") as f:
+        json.dump(evaluation_outputs, f, indent=4)
+
     with open(run_dir / "results.json", "w", encoding="utf-8") as f:
         json.dump(results_data, f, indent=4)
 
@@ -368,6 +380,7 @@ def save_artifacts(run_dir, history, score, best_hps, y_pred_probs, initial_weig
         "initial_weights.json": initial_weights,
         "final_weights.json": final_weights,
     }
+
 
     for filename, data in artifacts_to_save.items():
         with open(run_dir / filename, "w", encoding="utf-8") as f:
@@ -430,7 +443,7 @@ def run_experiment(task_name="binary", binary=True, model_type="cnn"):
     save_artifacts(
         run_dir=run_dir, history=history, score=score, best_hps=best_hp,
         y_pred_probs=y_pred_probs, initial_weights=initial_weights, final_weights=final_weights,
-        tuning_time=tuning_time, training_time=training_time
+        tuning_time=tuning_time, training_time=training_time, y_true=y_true, y_pred=y_pred
     )
     print(f"--- Experimento '{task_name}' concluído. Resultados salvos em: {run_dir} ---")
 
